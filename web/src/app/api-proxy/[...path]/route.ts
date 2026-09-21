@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 function apiBase(): string {
   return (
@@ -40,13 +41,28 @@ async function proxy(
     }
   }
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(target, init);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Upstream fetch failed";
+  let upstream: Response | undefined;
+  let lastError: unknown;
+  const backoffs = [200, 500];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      upstream = await fetch(target, init);
+      break;
+    } catch (err) {
+      lastError = err;
+      if (attempt < backoffs.length) {
+        await new Promise((resolve) => setTimeout(resolve, backoffs[attempt]));
+      }
+    }
+  }
+
+  if (!upstream) {
+    const message =
+      lastError instanceof Error ? lastError.message : "Upstream fetch failed";
     return NextResponse.json(
-      { detail: `API proxy error: ${message}` },
+      {
+        detail: `API proxy error: ${message}. The API tunnel may be down; please retry in a few seconds.`,
+      },
       { status: 502 }
     );
   }
