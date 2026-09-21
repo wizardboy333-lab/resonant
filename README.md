@@ -2,7 +2,7 @@
 
 Monorepo product: polished web converter, yt-dlp API, and iOS Share Extension.
 
-> **Ethics:** Only download content you have rights to. YouTube ToS may restrict downloading. Public watch URLs only — no credential scraping, no DRM bypass.
+> **Ethics:** Only download content you have rights to. YouTube ToS may restrict downloading. Public watch URLs and public playlists only — no credential scraping, no DRM bypass.
 
 ## Architecture
 
@@ -14,14 +14,14 @@ Monorepo product: polished web converter, yt-dlp API, and iOS Share Extension.
         ▲
         │  ?url=
 ┌───────┴───────┐
-│ iOS Share Ext │  youtube.com / youtu.be
+│ iOS Share Ext │  youtube.com / youtu.be / playlists
 └───────────────┘
 ```
 
 | Path | Stack |
 |------|--------|
 | `/web` | Next.js 14, TypeScript, Tailwind — landing + `/convert` |
-| `/api` | Python FastAPI, yt-dlp, ffmpeg — meta + convert + download |
+| `/api` | Python FastAPI, yt-dlp, ffmpeg — meta + convert + playlist ZIP |
 | `/ios` | SwiftUI shell + Share Extension (unsigned source) |
 
 ## Quick start (local, no Docker)
@@ -55,11 +55,21 @@ Or: `./scripts/dev.sh` (starts API + web).
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/health` | Health + ethics notice |
-| GET/POST | `/api/meta` | Metadata preview |
+| GET | `/health` | Health + ethics notice + playlist caps |
+| GET/POST | `/api/meta` | Single-video metadata preview |
 | POST | `/api/convert` | Body `{ "url", "quality": "best"\|"256"\|"128" }` |
 | GET | `/api/download/{job}/{file}` | Download extracted audio |
 | GET | `/api/stream?url=&quality=` | Convert + stream attachment |
+| GET/POST | `/api/playlist/meta` | Playlist listing (flat, capped) |
+| POST | `/api/playlist/convert` | Body `{ "url", "quality", "ids"? }` → ZIP of audio |
+
+### Playlists
+
+Accepts `youtube.com/playlist?list=…`, watch URLs with `&list=`, and `youtu.be` URLs with `list=`.
+
+- **Listing** uses yt-dlp `extract_flat` and caps at **100** entries (`PLAYLIST_LIST_CAP`).
+- **Bulk convert** returns a ZIP; max **30** tracks per request (`PLAYLIST_CONVERT_CAP`), concurrency **2** (`PLAYLIST_CONCURRENCY`) — tuned for Render free-tier timeouts. Pass `ids` to convert a subset.
+- Public playlists only; private / login-walled / DRM content returns a clear error.
 
 ### Quality options
 
@@ -90,11 +100,12 @@ Bundle IDs:
 ## How to test conversion
 
 1. Start API + web as above.
-2. Use a **short public / Creative Commons** YouTube URL you have rights to, e.g. well-known public demo clips.
+2. Use a **short public / Creative Commons** YouTube URL or playlist you have rights to.
 3. Or curl:
 
 ```bash
 curl -s "http://127.0.0.1:8000/api/meta?url=https://www.youtube.com/watch?v=VIDEO_ID" | jq .
+curl -s "http://127.0.0.1:8000/api/playlist/meta?url=https://www.youtube.com/playlist?list=PLAYLIST_ID" | jq .
 curl -s -X POST http://127.0.0.1:8000/api/convert \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://www.youtube.com/watch?v=VIDEO_ID","quality":"128"}' | jq .

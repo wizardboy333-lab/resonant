@@ -17,7 +17,7 @@ export default function ConvertPage({
           Converter
         </h1>
         <p className="mt-2 text-mist-400">
-          Paste a public YouTube URL, or open this page with{" "}
+          Paste a public YouTube video or playlist URL, or open this page with{" "}
           <code className="rounded bg-ink-700 px-1.5 py-0.5 font-mono text-xs text-ember-200">
             ?url=
           </code>

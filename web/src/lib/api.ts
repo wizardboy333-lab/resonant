@@ -25,6 +25,26 @@ export interface ConvertResponse {
   bitrate_kbps: number | null;
 }
 
+export interface PlaylistEntry {
+  id: string;
+  title: string;
+  duration: number | null;
+  duration_string: string | null;
+  thumbnail: string | null;
+  url: string | null;
+}
+
+export interface PlaylistMeta {
+  id: string;
+  title: string;
+  uploader: string | null;
+  entries: PlaylistEntry[];
+  entry_count: number;
+  truncated: boolean;
+  truncated_note: string | null;
+  webpage_url: string | null;
+}
+
 /** Browser: same-origin proxy so phones can reach the API. Server: internal URL. */
 function apiBase(): string {
   if (typeof window !== "undefined") {
@@ -68,6 +88,15 @@ export async function fetchMeta(url: string): Promise<VideoMeta> {
   return res.json();
 }
 
+export async function fetchPlaylistMeta(url: string): Promise<PlaylistMeta> {
+  const res = await fetch(
+    `${apiBase()}/api/playlist/meta?url=${encodeURIComponent(url)}`,
+    { cache: "no-store" }
+  );
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}
+
 export async function convertAudio(
   url: string,
   quality: Quality
@@ -81,9 +110,42 @@ export async function convertAudio(
   return res.json();
 }
 
+/** Convert playlist tracks to a ZIP blob (all or selected ids). */
+export async function convertPlaylistZip(
+  url: string,
+  quality: Quality,
+  ids?: string[]
+): Promise<{ blob: Blob; filename: string; trackCount: number; failedCount: number }> {
+  const res = await fetch(`${apiBase()}/api/playlist/convert`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, quality, ids: ids ?? null }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  const filename = match?.[1] || "playlist.zip";
+  const trackCount = Number(res.headers.get("X-Track-Count") || "0");
+  const failedCount = Number(res.headers.get("X-Failed-Count") || "0");
+  return { blob, filename, trackCount, failedCount };
+}
+
 export function looksLikeYoutubeUrl(value: string): boolean {
   const v = value.trim();
   if (!v) return false;
   if (/^[A-Za-z0-9_-]{11}$/.test(v)) return true;
   return /youtu\.?be|youtube\.com/i.test(v);
+}
+
+/** Detect playlist URLs: /playlist?list=, watch/youtu.be with list=, bare PL… ids. */
+export function looksLikePlaylistUrl(value: string): boolean {
+  const v = value.trim();
+  if (!v) return false;
+  if (/[?&]list=/i.test(v)) return true;
+  if (/youtube\.com\/playlist/i.test(v)) return true;
+  // Bare playlist-ish ids (longer than a video id)
+  if (/^(PL|UU|LL|FL|OL|RD|SE)[\w-]{10,}$/i.test(v)) return true;
+  return false;
 }

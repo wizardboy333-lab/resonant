@@ -3,11 +3,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ConvertResponse,
+  PlaylistMeta,
   Quality,
   VideoMeta,
   absoluteDownloadUrl,
   convertAudio,
+  convertPlaylistZip,
   fetchMeta,
+  fetchPlaylistMeta,
+  looksLikePlaylistUrl,
   looksLikeYoutubeUrl,
 } from "../lib/api";
 import { formatBytes, formatViews } from "../lib/format";
@@ -19,31 +23,86 @@ const QUALITIES: { id: Quality; label: string; hint: string }[] = [
   { id: "128", label: "128 kbps", hint: "MP3" },
 ];
 
-type Stage = "idle" | "meta" | "ready" | "converting" | "done" | "error";
+/** Soft client-side cap matching API PLAYLIST_CONVERT_CAP default */
+const CLIENT_CONVERT_CAP = 30;
+
+type Stage =
+  | "idle"
+  | "meta"
+  | "ready"
+  | "converting"
+  | "done"
+  | "error";
+
+type Mode = "video" | "playlist";
 
 export default function Converter({ initialUrl = "" }: { initialUrl?: string }) {
   const [url, setUrl] = useState(initialUrl);
   const [quality, setQuality] = useState<Quality>("best");
   const [meta, setMeta] = useState<VideoMeta | null>(null);
+  const [playlist, setPlaylist] = useState<PlaylistMeta | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<ConvertResponse | null>(null);
+  const [zipInfo, setZipInfo] = useState<{
+    filename: string;
+    trackCount: number;
+    failedCount: number;
+    sizeBytes: number;
+  } | null>(null);
+  const [zipUrl, setZipUrl] = useState<string | null>(null);
   const [stage, setStage] = useState<Stage>("idle");
+  const [mode, setMode] = useState<Mode>("video");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
 
   const canPreview = useMemo(() => looksLikeYoutubeUrl(url), [url]);
+
+  const allSelected =
+    !!playlist &&
+    playlist.entries.length > 0 &&
+    playlist.entries.every((e) => selected.has(e.id));
+
+  const selectedCount = selected.size;
+
+  const resetPreview = () => {
+    setMeta(null);
+    setPlaylist(null);
+    setSelected(new Set());
+    setResult(null);
+    setZipInfo(null);
+    if (zipUrl) {
+      URL.revokeObjectURL(zipUrl);
+      setZipUrl(null);
+    }
+  };
 
   const loadMeta = useCallback(async (u: string) => {
     if (!looksLikeYoutubeUrl(u)) return;
     setStage("meta");
     setError(null);
     setResult(null);
+    setZipInfo(null);
     setMeta(null);
+    setPlaylist(null);
+    setSelected(new Set());
     setProgress(12);
+
+    const trimmed = u.trim();
     try {
-      const m = await fetchMeta(u.trim());
-      setMeta(m);
-      setStage("ready");
-      setProgress(0);
+      if (looksLikePlaylistUrl(trimmed)) {
+        const pl = await fetchPlaylistMeta(trimmed);
+        setPlaylist(pl);
+        setSelected(new Set(pl.entries.map((e) => e.id)));
+        setMode("playlist");
+        setStage("ready");
+        setProgress(0);
+      } else {
+        const m = await fetchMeta(trimmed);
+        setMeta(m);
+        setMode("video");
+        setStage("ready");
+        setProgress(0);
+      }
     } catch (e) {
       setStage("error");
       setError(e instanceof Error ? e.message : "Failed to load metadata");
@@ -57,7 +116,14 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
     }
   }, [initialUrl, loadMeta]);
 
-  // Fake progress while converting (yt-dlp doesn't stream % easily)
+  // Revoke blob URL on unmount
+  useEffect(() => {
+    return () => {
+      if (zipUrl) URL.revokeObjectURL(zipUrl);
+    };
+  }, [zipUrl]);
+
+  // Fake progress while converting
   useEffect(() => {
     if (stage !== "converting") return;
     setProgress(8);
@@ -76,7 +142,25 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
     await loadMeta(url);
   }
 
-  async function onConvert() {
+  function toggleAll() {
+    if (!playlist) return;
+    if (allSelected) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(playlist.entries.map((e) => e.id)));
+    }
+  }
+
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function onConvertVideo() {
     if (!url.trim()) return;
     setStage("converting");
     setError(null);
@@ -94,12 +178,73 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
     }
   }
 
-  function onDownload() {
+  async function onConvertPlaylist(ids: string[] | "all") {
+    if (!url.trim() || !playlist) return;
+    const chosen =
+      ids === "all" ? playlist.entries.map((e) => e.id) : ids;
+
+    if (chosen.length === 0) {
+      setError("Select at least one track.");
+      setStage("error");
+      return;
+    }
+    if (chosen.length > CLIENT_CONVERT_CAP) {
+      setError(
+        `Select at most ${CLIENT_CONVERT_CAP} tracks at a time (host timeout limits).`
+      );
+      setStage("error");
+      return;
+    }
+
+    setStage("converting");
+    setError(null);
+    setResult(null);
+    setZipInfo(null);
+    if (zipUrl) {
+      URL.revokeObjectURL(zipUrl);
+      setZipUrl(null);
+    }
+
+    try {
+      const { blob, filename, trackCount, failedCount } = await convertPlaylistZip(
+        url.trim(),
+        quality,
+        chosen
+      );
+      const objectUrl = URL.createObjectURL(blob);
+      setZipUrl(objectUrl);
+      setZipInfo({
+        filename,
+        trackCount,
+        failedCount,
+        sizeBytes: blob.size,
+      });
+      setProgress(100);
+      setStage("done");
+    } catch (e) {
+      setStage("error");
+      setError(e instanceof Error ? e.message : "Playlist conversion failed");
+      setProgress(0);
+    }
+  }
+
+  function onDownloadVideo() {
     if (!result) return;
     const href = absoluteDownloadUrl(result.download_url);
     const a = document.createElement("a");
     a.href = href;
     a.download = result.filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function onDownloadZip() {
+    if (!zipUrl || !zipInfo) return;
+    const a = document.createElement("a");
+    a.href = zipUrl;
+    a.download = zipInfo.filename;
     a.rel = "noopener";
     document.body.appendChild(a);
     a.click();
@@ -118,12 +263,13 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
               type="url"
               inputMode="url"
               autoComplete="off"
-              placeholder="https://www.youtube.com/watch?v=… or youtu.be/…"
+              placeholder="Video or playlist — youtube.com / youtu.be / playlist?list=…"
               value={url}
               onChange={(e) => {
                 setUrl(e.target.value);
                 setStage("idle");
                 setError(null);
+                resetPreview();
               }}
               className="w-full flex-1 rounded-2xl border border-white/10 bg-ink-800/80 px-4 py-3.5 text-base text-mist-100 placeholder:text-mist-500 shadow-inner transition focus:border-ember-400/50 focus:bg-ink-700"
             />
@@ -141,7 +287,15 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
       {(stage === "meta" || stage === "converting") && (
         <div className="space-y-2">
           <div className="flex justify-between text-xs text-mist-400">
-            <span>{stage === "meta" ? "Fetching metadata…" : "Extracting audio…"}</span>
+            <span>
+              {stage === "meta"
+                ? mode === "playlist" || looksLikePlaylistUrl(url)
+                  ? "Fetching playlist…"
+                  : "Fetching metadata…"
+                : mode === "playlist"
+                  ? "Extracting playlist audio…"
+                  : "Extracting audio…"}
+            </span>
             <span>{Math.round(progress)}%</span>
           </div>
           <div className="h-2 overflow-hidden rounded-full bg-ink-700">
@@ -162,7 +316,8 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
         </div>
       )}
 
-      {meta && (
+      {/* -------- Single video -------- */}
+      {meta && mode === "video" && (
         <article className="overflow-hidden rounded-3xl border border-white/10 bg-ink-800/60 shadow-card">
           <div className="grid gap-0 sm:grid-cols-[minmax(0,220px)_1fr]">
             <div className="relative aspect-video bg-ink-900 sm:aspect-auto sm:min-h-[140px]">
@@ -201,37 +356,16 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
           </div>
 
           <div className="border-t border-white/5 px-5 py-5 sm:px-6">
-            <p className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-mist-400">
-              Quality
-            </p>
-            <div className="grid grid-cols-3 gap-2">
-              {QUALITIES.map((q) => {
-                const active = quality === q.id;
-                return (
-                  <button
-                    key={q.id}
-                    type="button"
-                    onClick={() => setQuality(q.id)}
-                    disabled={stage === "converting"}
-                    className={`rounded-2xl border px-3 py-3 text-left transition ${
-                      active
-                        ? "border-ember-400/60 bg-ember-500/15 shadow-glow"
-                        : "border-white/10 bg-ink-900/50 hover:border-white/20"
-                    }`}
-                  >
-                    <span className="block text-sm font-semibold text-mist-100">
-                      {q.label}
-                    </span>
-                    <span className="mt-0.5 block text-[11px] text-mist-400">{q.hint}</span>
-                  </button>
-                );
-              })}
-            </div>
+            <QualityPicker
+              quality={quality}
+              setQuality={setQuality}
+              disabled={stage === "converting"}
+            />
 
             <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center">
               <button
                 type="button"
-                onClick={onConvert}
+                onClick={onConvertVideo}
                 disabled={stage === "converting" || stage === "meta"}
                 className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-ember-500 to-ember-600 px-5 py-3.5 text-sm font-semibold text-ink-950 shadow-glow transition hover:from-ember-400 hover:to-ember-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -248,7 +382,7 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
               {result && stage === "done" && (
                 <button
                   type="button"
-                  onClick={onDownload}
+                  onClick={onDownloadVideo}
                   className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-viola-400/40 bg-viola-500/15 px-5 py-3.5 text-sm font-semibold text-viola-300 transition hover:bg-viola-500/25"
                 >
                   Download {result.format.toUpperCase()}
@@ -272,7 +406,218 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
         </article>
       )}
 
+      {/* -------- Playlist -------- */}
+      {playlist && mode === "playlist" && (
+        <article className="overflow-hidden rounded-3xl border border-white/10 bg-ink-800/60 shadow-card">
+          <div className="border-b border-white/5 px-5 py-5 sm:px-6">
+            <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.18em] text-ember-300">
+              Playlist
+            </p>
+            <h2 className="font-display text-xl leading-snug text-mist-100 text-balance sm:text-2xl">
+              {playlist.title}
+            </h2>
+            <p className="mt-1 text-sm text-mist-300">
+              {playlist.uploader || "Unknown uploader"}
+              <span className="text-mist-500">
+                {" "}
+                · {playlist.entry_count} track
+                {playlist.entry_count === 1 ? "" : "s"}
+              </span>
+            </p>
+            {playlist.truncated && playlist.truncated_note && (
+              <p className="mt-2 text-xs text-ember-200/80">{playlist.truncated_note}</p>
+            )}
+          </div>
+
+          <div className="max-h-[420px] overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-white/5 bg-ink-900/95 px-5 py-3 backdrop-blur sm:px-6">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-mist-200">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={toggleAll}
+                  disabled={stage === "converting"}
+                  className="h-4 w-4 rounded border-white/20 bg-ink-800 text-ember-500 focus:ring-ember-400/40"
+                />
+                Select all
+              </label>
+              <span className="text-xs text-mist-400">
+                {selectedCount} selected
+                {selectedCount > CLIENT_CONVERT_CAP && (
+                  <span className="text-red-300">
+                    {" "}
+                    (max {CLIENT_CONVERT_CAP})
+                  </span>
+                )}
+              </span>
+            </div>
+
+            <ul className="divide-y divide-white/5">
+              {playlist.entries.map((entry) => {
+                const checked = selected.has(entry.id);
+                return (
+                  <li key={entry.id}>
+                    <label
+                      className={`flex cursor-pointer items-center gap-3 px-5 py-3 transition hover:bg-white/[0.03] sm:px-6 ${
+                        checked ? "bg-ember-500/5" : ""
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleOne(entry.id)}
+                        disabled={stage === "converting"}
+                        className="h-4 w-4 shrink-0 rounded border-white/20 bg-ink-800 text-ember-500 focus:ring-ember-400/40"
+                      />
+                      <div className="relative h-12 w-20 shrink-0 overflow-hidden rounded-lg bg-ink-900">
+                        {entry.thumbnail ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={entry.thumbnail}
+                            alt=""
+                            className="h-full w-full object-cover"
+                          />
+                        ) : null}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-mist-100">
+                          {entry.title}
+                        </p>
+                        <p className="font-mono text-[11px] text-mist-500">
+                          {entry.duration_string || "—"} · {entry.id}
+                        </p>
+                      </div>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+
+          <div className="border-t border-white/5 px-5 py-5 sm:px-6">
+            <QualityPicker
+              quality={quality}
+              setQuality={setQuality}
+              disabled={stage === "converting"}
+            />
+
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center">
+              <button
+                type="button"
+                onClick={() => onConvertPlaylist(Array.from(selected))}
+                disabled={
+                  stage === "converting" ||
+                  stage === "meta" ||
+                  selectedCount === 0 ||
+                  selectedCount > CLIENT_CONVERT_CAP
+                }
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-ember-500 to-ember-600 px-5 py-3.5 text-sm font-semibold text-ink-950 shadow-glow transition hover:from-ember-400 hover:to-ember-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {stage === "converting" ? (
+                  <>
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-ink-950/30 border-t-ink-950" />
+                    Converting…
+                  </>
+                ) : (
+                  <>Download selected ({selectedCount})</>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onConvertPlaylist("all")}
+                disabled={
+                  stage === "converting" ||
+                  stage === "meta" ||
+                  playlist.entries.length === 0 ||
+                  playlist.entries.length > CLIENT_CONVERT_CAP
+                }
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/5 px-5 py-3.5 text-sm font-semibold text-mist-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Download all
+                {playlist.entries.length > CLIENT_CONVERT_CAP
+                  ? ` (cap ${CLIENT_CONVERT_CAP})`
+                  : ` (${playlist.entries.length})`}
+              </button>
+            </div>
+
+            {playlist.entries.length > CLIENT_CONVERT_CAP && (
+              <p className="mt-3 text-xs text-mist-400">
+                Large playlists: convert in batches of {CLIENT_CONVERT_CAP} or fewer
+                (Render free-tier request timeouts).
+              </p>
+            )}
+
+            {zipInfo && stage === "done" && zipUrl && (
+              <div className="mt-4 space-y-3">
+                <button
+                  type="button"
+                  onClick={onDownloadZip}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-viola-400/40 bg-viola-500/15 px-5 py-3.5 text-sm font-semibold text-viola-300 transition hover:bg-viola-500/25"
+                >
+                  Download ZIP
+                  <span className="font-normal text-mist-400">
+                    ({formatBytes(zipInfo.sizeBytes)})
+                  </span>
+                </button>
+                <p className="text-xs text-mist-400">
+                  Ready · {zipInfo.trackCount} track
+                  {zipInfo.trackCount === 1 ? "" : "s"} in {zipInfo.filename}
+                  {zipInfo.failedCount > 0 && (
+                    <span className="text-ember-200">
+                      {" "}
+                      · {zipInfo.failedCount} failed (see _errors.txt in ZIP)
+                    </span>
+                  )}
+                </p>
+              </div>
+            )}
+          </div>
+        </article>
+      )}
+
       <EthicsNotice />
     </div>
+  );
+}
+
+function QualityPicker({
+  quality,
+  setQuality,
+  disabled,
+}: {
+  quality: Quality;
+  setQuality: (q: Quality) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <>
+      <p className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-mist-400">
+        Quality
+      </p>
+      <div className="grid grid-cols-3 gap-2">
+        {QUALITIES.map((q) => {
+          const active = quality === q.id;
+          return (
+            <button
+              key={q.id}
+              type="button"
+              onClick={() => setQuality(q.id)}
+              disabled={disabled}
+              className={`rounded-2xl border px-3 py-3 text-left transition ${
+                active
+                  ? "border-ember-400/60 bg-ember-500/15 shadow-glow"
+                  : "border-white/10 bg-ink-900/50 hover:border-white/20"
+              }`}
+            >
+              <span className="block text-sm font-semibold text-mist-100">
+                {q.label}
+              </span>
+              <span className="mt-0.5 block text-[11px] text-mist-400">{q.hint}</span>
+            </button>
+          );
+        })}
+      </div>
+    </>
   );
 }
