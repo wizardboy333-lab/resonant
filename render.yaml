@@ -1,9 +1,9 @@
 # Render Blueprint for Resonant. Import this file from a GitHub repository.
+# Paths are relative to the repo root (no rootDir — avoids api/api doubling).
 services:
   - type: web
     name: resonant-api
     runtime: docker
-    rootDir: api
     dockerfilePath: ./api/Dockerfile
     dockerContext: ./api
     plan: free
@@ -17,16 +17,11 @@ services:
   - type: web
     name: resonant-web
     runtime: docker
-    rootDir: web
     dockerfilePath: ./web/Dockerfile
     dockerContext: ./web
     plan: free
     envVars:
-      # Free Render web services should use the API's public URL. The Next.js
-      # server proxies browser requests through /api-proxy.
       - key: API_INTERNAL_URL
-        value: https://resonant-api.onrender.com
-      # Keep browser-side API calls same-origin; the Dockerfile build default
-      # is empty as well.
+        value: https://resonant-api-63qd.onrender.com
       - key: NEXT_PUBLIC_API_URL
         value: ""
