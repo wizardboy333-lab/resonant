@@ -33,9 +33,11 @@ async function proxy(
     cache: "no-store",
   };
 
-  if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
-    init.body = req.body;
-    init.duplex = "half";
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    const buf = await req.arrayBuffer();
+    if (buf.byteLength > 0) {
+      init.body = buf;
+    }
   }
 
   let upstream: Response;
@@ -65,7 +67,21 @@ async function proxy(
     if (value) outHeaders.set(name, value);
   }
 
-  // Stream body through (important for /api/download/* audio files)
+  const contentType = upstream.headers.get("content-type") || "";
+  // Buffer JSON/text so Render/Next doesn't truncate streamed JSON playlist payloads
+  if (
+    contentType.includes("application/json") ||
+    contentType.includes("text/")
+  ) {
+    const body = await upstream.arrayBuffer();
+    outHeaders.set("content-length", String(body.byteLength));
+    return new NextResponse(body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: outHeaders,
+    });
+  }
+
   return new NextResponse(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
