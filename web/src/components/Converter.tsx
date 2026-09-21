@@ -9,10 +9,12 @@ import {
   absoluteDownloadUrl,
   convertAudio,
   convertPlaylistZip,
+  extractVideoId,
   fetchMeta,
   fetchPlaylistMeta,
   looksLikePlaylistUrl,
   looksLikeYoutubeUrl,
+  stripToWatchUrl,
 } from "../lib/api";
 import { formatBytes, formatViews } from "../lib/format";
 import EthicsNotice from "./EthicsNotice";
@@ -90,14 +92,30 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
     const trimmed = u.trim();
     try {
       if (looksLikePlaylistUrl(trimmed)) {
-        const pl = await fetchPlaylistMeta(trimmed);
-        setPlaylist(pl);
-        setSelected(new Set(pl.entries.map((e) => e.id)));
-        setMode("playlist");
-        setStage("ready");
-        setProgress(0);
+        try {
+          const pl = await fetchPlaylistMeta(trimmed);
+          setPlaylist(pl);
+          setSelected(new Set(pl.entries.map((e) => e.id)));
+          setMode("playlist");
+          setStage("ready");
+          setProgress(0);
+          return;
+        } catch (playlistErr) {
+          // Defense in depth: Mix/Radio (or other unviewable lists) with a video id → video meta
+          const watch = stripToWatchUrl(trimmed);
+          if (watch && extractVideoId(trimmed)) {
+            const m = await fetchMeta(watch);
+            setMeta(m);
+            setMode("video");
+            setStage("ready");
+            setProgress(0);
+            return;
+          }
+          throw playlistErr;
+        }
       } else {
-        const m = await fetchMeta(trimmed);
+        const watch = stripToWatchUrl(trimmed) || trimmed;
+        const m = await fetchMeta(watch);
         setMeta(m);
         setMode("video");
         setStage("ready");

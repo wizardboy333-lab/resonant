@@ -419,9 +419,27 @@ def _is_login_or_bot_block(msg: str) -> bool:
     return any(n in low for n in needles)
 
 
+def _is_unviewable_mix_playlist(msg: str) -> bool:
+    """yt-dlp cannot flat-extract YouTube Mix/Radio (RD…) playlists."""
+    low = msg.lower()
+    if "unviewable" in low:
+        return True
+    if "this playlist type is unviewable" in low:
+        return True
+    # Mix/Radio playlist wording sometimes appears without "unviewable"
+    if "mix" in low and "playlist" in low and ("not supported" in low or "cannot" in low):
+        return True
+    return False
+
+
 def _friendly_ytdlp_error(exc: BaseException) -> str:
     msg = str(exc)
     low = msg.lower()
+    if _is_unviewable_mix_playlist(msg):
+        return (
+            "YouTube Mix/Radio playlists aren't supported — "
+            "paste the video URL, or a normal playlist."
+        )
     if "private" in low:
         return "This video or playlist is private and cannot be accessed."
     if "unavailable" in low or "not available" in low:
@@ -441,9 +459,12 @@ def _friendly_ytdlp_error(exc: BaseException) -> str:
 
 def _http_status_for_ytdlp(exc: BaseException) -> int:
     """Map yt-dlp failures to a clear client status (403 for host blocks)."""
-    if _is_login_or_bot_block(str(exc)):
+    msg = str(exc)
+    if _is_unviewable_mix_playlist(msg):
+        return 400
+    if _is_login_or_bot_block(msg):
         return 403
-    low = str(exc).lower()
+    low = msg.lower()
     if "private" in low:
         return 403
     return 502
@@ -466,7 +487,12 @@ def _run_with_retries(fn, *args, attempts: int = YTDLP_RETRIES):
             return fn(*args)
         except Exception as e:  # noqa: BLE001 — surface via friendly mapper
             last = e
-            if _is_login_or_bot_block(str(e)) or "private" in str(e).lower():
+            msg = str(e)
+            if (
+                _is_login_or_bot_block(msg)
+                or _is_unviewable_mix_playlist(msg)
+                or "private" in msg.lower()
+            ):
                 raise
             if i + 1 >= attempts:
                 raise

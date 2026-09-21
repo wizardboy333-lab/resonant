@@ -68,20 +68,45 @@ export function absoluteDownloadUrl(path: string): string {
 
 async function parseError(res: Response): Promise<string> {
   const statusPrefix = `HTTP ${res.status}`;
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
   try {
-    const data = await res.json();
-    if (typeof data?.detail === "string" && data.detail.trim()) {
-      return data.detail;
+    // Clone so we can fall back to text if JSON parse fails on HTML error pages
+    const raw = await res.clone().text();
+    const looksHtml =
+      ct.includes("text/html") ||
+      /^\s*<(!DOCTYPE|html|head|body|title|cf-|center)/i.test(raw);
+
+    if (!looksHtml) {
+      try {
+        const data = JSON.parse(raw);
+        if (typeof data?.detail === "string" && data.detail.trim()) {
+          return data.detail;
+        }
+        if (Array.isArray(data?.detail)) {
+          const joined = data.detail
+            .map((d: { msg?: string }) => d.msg)
+            .filter(Boolean)
+            .join("; ");
+          if (joined) return joined;
+        }
+        if (data && typeof data === "object") {
+          return `${statusPrefix}: ${JSON.stringify(data)}`;
+        }
+      } catch {
+        /* fall through */
+      }
     }
-    if (Array.isArray(data?.detail)) {
-      const joined = data.detail
-        .map((d: { msg?: string }) => d.msg)
-        .filter(Boolean)
-        .join("; ");
-      if (joined) return joined;
+
+    if (looksHtml) {
+      if (res.status === 502 || res.status === 503 || res.status === 504) {
+        return `${statusPrefix}: upstream unavailable (try again, or paste a single video URL)`;
+      }
+      return `${statusPrefix}: unexpected HTML error page from proxy/upstream`;
     }
-    if (data && typeof data === "object") {
-      return `${statusPrefix}: ${JSON.stringify(data)}`;
+
+    const trimmed = raw.trim();
+    if (trimmed) {
+      return trimmed.length > 280 ? `${statusPrefix}: ${trimmed.slice(0, 280)}…` : trimmed;
     }
     return res.statusText ? `${statusPrefix}: ${res.statusText}` : statusPrefix;
   } catch {
@@ -149,13 +174,76 @@ export function looksLikeYoutubeUrl(value: string): boolean {
   return /youtu\.?be|youtube\.com/i.test(v);
 }
 
-/** Detect playlist URLs: /playlist?list=, watch/youtu.be with list=, bare PL… ids. */
+/** Extract an 11-char YouTube video id from a watch / youtu.be / shorts URL, or bare id. */
+export function extractVideoId(value: string): string | null {
+  const v = value.trim();
+  if (!v) return null;
+  if (/^[A-Za-z0-9_-]{11}$/.test(v)) return v;
+  try {
+    const withProto = /^https?:\/\//i.test(v) ? v : `https://${v}`;
+    const u = new URL(withProto);
+    const host = u.hostname.replace(/^www\./, "").toLowerCase();
+    if (host === "youtu.be") {
+      const id = u.pathname.replace(/^\//, "").split("/")[0] || "";
+      return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+    }
+    if (host.endsWith("youtube.com")) {
+      const vParam = u.searchParams.get("v");
+      if (vParam && /^[A-Za-z0-9_-]{11}$/.test(vParam)) return vParam;
+      const m = u.pathname.match(/\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})/);
+      if (m) return m[1];
+    }
+  } catch {
+    /* ignore */
+  }
+  const m =
+    /(?:v=|youtu\.be\/|\/(?:shorts|embed|live)\/)([A-Za-z0-9_-]{11})/i.exec(v);
+  return m ? m[1] : null;
+}
+
+/** Keep only the canonical single-video watch URL when a video id is present. */
+export function stripToWatchUrl(url: string): string | null {
+  const id = extractVideoId(url);
+  return id ? `https://www.youtube.com/watch?v=${id}` : null;
+}
+
+function isMixOrRadioList(listId: string | null): boolean {
+  if (!listId) return false;
+  // Mix/Radio: RD… (including RD followed by a video id), or explicit start_radio
+  return /^RD/i.test(listId);
+}
+
+/** Detect real playlist URLs. Mix/Radio watch shares with a video id are NOT playlists. */
 export function looksLikePlaylistUrl(value: string): boolean {
   const v = value.trim();
   if (!v) return false;
-  if (/[?&]list=/i.test(v)) return true;
-  if (/youtube\.com\/playlist/i.test(v)) return true;
+
   // Bare playlist-ish ids (longer than a video id)
   if (/^(PL|UU|LL|FL|OL|RD|SE)[\w-]{10,}$/i.test(v)) return true;
-  return false;
+  if (/youtube\.com\/playlist/i.test(v)) return true;
+
+  let listId: string | null = null;
+  let startRadio = false;
+  try {
+    const withProto = /^https?:\/\//i.test(v) ? v : `https://${v}`;
+    const u = new URL(withProto);
+    listId = u.searchParams.get("list");
+    startRadio =
+      u.searchParams.get("start_radio") === "1" ||
+      u.searchParams.has("start_radio");
+  } catch {
+    const lm = /[?&]list=([^&]+)/i.exec(v);
+    listId = lm ? decodeURIComponent(lm[1]) : null;
+    startRadio = /[?&]start_radio=1\b/i.test(v);
+  }
+
+  if (!listId && !/[?&]list=/i.test(v)) return false;
+
+  const videoId = extractVideoId(v);
+  // Watch / youtu.be URL with a concrete video + Mix/Radio → treat as single video
+  if (videoId && (isMixOrRadioList(listId) || startRadio)) {
+    return false;
+  }
+
+  return true;
 }
