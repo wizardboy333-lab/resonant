@@ -11,3 +11,6 @@ web/.env.local
 .DS_Store
 ios/DerivedData/
 *.xcuserstate
+
+# YouTube / yt-dlp session cookies (never commit)
+cookies*.txt

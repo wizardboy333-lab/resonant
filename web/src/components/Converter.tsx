@@ -316,6 +316,13 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
             Error
           </p>
           <p className="whitespace-pre-wrap break-words">{error}</p>
+          {isHostBlockError(error) && (
+            <p className="mt-2 text-xs text-red-100/80">
+              Tip: this host looks blocked by YouTube (login / bot-check). Cookies
+              or a different host may help — it is not necessarily a permanent
+              outage. See the Render deploy docs for optional cookie setup.
+            </p>
+          )}
         </div>
       )}
 
@@ -581,6 +588,23 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
 
       <EthicsNotice />
     </div>
+  );
+}
+
+
+function isHostBlockError(message: string): boolean {
+  const low = message.toLowerCase();
+  return (
+    low.includes("blocking this host") ||
+    low.includes("bot-check") ||
+    low.includes("bot check") ||
+    low.includes("sign in") ||
+    low.includes("login") ||
+    low.includes("log in") ||
+    low.includes("cookies") ||
+    low.includes("membership") ||
+    low.includes("age-restricted") ||
+    low.includes("age restricted")
   );
 }
 

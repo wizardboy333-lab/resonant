@@ -62,9 +62,48 @@ The API can remain on its Render URL because the web server performs the proxy.
   storage.
 - `yt-dlp` may be blocked or challenged by YouTube from datacenter IP ranges.
   A healthy Render deployment does not guarantee that every YouTube URL will
-  convert.
+  convert. Optional cookies (see below) can help when the host is blocked.
 - The API uses `CORS_ORIGINS=*` as requested. If the API is ever exposed to
   browser clients directly, replace it with the web origin.
+
+## YouTube cookies (optional, for host blocks)
+
+Datacenter IPs (including Render free tier) are often challenged or blocked by
+YouTube. If converts fail with a **403** about login, membership, or bot-check,
+you can supply a Netscape `cookies.txt` from a logged-in browser session.
+
+**Treat cookies like a password.** Never commit them to git. Rotate or revoke
+the session if the file may have leaked.
+
+### Export cookies
+
+1. Install a browser extension such as **Get cookies.txt LOCALLY**
+   (Chrome/Firefox). Prefer a local-only exporter that does not upload your
+   cookies.
+2. Open [youtube.com](https://www.youtube.com) while signed in.
+3. Export cookies for `youtube.com` (Netscape `cookies.txt` format).
+4. Keep the file off the repository (see `.gitignore` for `cookies*.txt`).
+
+### Configure on Render
+
+**Option A — secret env (recommended for free tier)**
+
+1. Open **resonant-api → Environment**.
+2. Add a **secret** env var named `YTDLP_COOKIES`.
+3. Paste the full multiline contents of your `cookies.txt` as the value.
+4. Save and redeploy the API. On startup the service writes the value to
+   `/tmp/ytdlp-cookies.txt` and passes it to yt-dlp as `cookiefile`.
+
+**Option B — file path**
+
+1. Place a Netscape cookies file on the instance (e.g. a mounted secret file).
+2. Set env `YTDLP_COOKIES_FILE` to that absolute path.
+3. Redeploy. The path is used only if the file exists.
+
+`YTDLP_COOKIES_FILE` wins when the path exists; otherwise `YTDLP_COOKIES` is
+used. Cookies expire — re-export and update the env when converts start failing
+again. This does not guarantee every URL will work; it only improves odds on
+blocked hosts.
 
 ## Port handling
 

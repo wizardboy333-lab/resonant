@@ -49,7 +49,7 @@ app = FastAPI(
     description=(
         "Extract audio from public YouTube watch URLs and playlists. "
         "Only download content you have rights to. YouTube ToS may restrict downloading. "
-        "Public content only — no login, cookies, or DRM bypass."
+        "Public content preferred; optional operator cookies via env. No DRM bypass."
     ),
     version="1.1.0",
 )
@@ -337,13 +337,47 @@ def quality_opts(quality: Quality) -> dict:
 YOUTUBE_PLAYER_CLIENTS = ["ios", "tv_embedded", "mweb", "android", "web"]
 YTDLP_RETRIES = 3
 
+# Optional Netscape cookies.txt for datacenter hosts blocked by YouTube.
+# Prefer YTDLP_COOKIES_FILE (path) or YTDLP_COOKIES (raw multiline env → /tmp).
+_COOKIES_TMP = Path("/tmp/ytdlp-cookies.txt")
+_cookiefile_resolved: str | None = None
+
+
+def _resolve_cookiefile() -> str | None:
+    """Return path to a cookies.txt if configured and present."""
+    global _cookiefile_resolved
+    if _cookiefile_resolved is not None:
+        return _cookiefile_resolved or None
+
+    path_env = (os.environ.get("YTDLP_COOKIES_FILE") or "").strip()
+    if path_env and Path(path_env).is_file():
+        _cookiefile_resolved = path_env
+        logger.info("yt-dlp cookies: using YTDLP_COOKIES_FILE=%s", path_env)
+        return _cookiefile_resolved
+
+    raw = os.environ.get("YTDLP_COOKIES")
+    if raw and raw.strip():
+        try:
+            _COOKIES_TMP.write_text(raw if raw.endswith("\n") else raw + "\n", encoding="utf-8")
+            _COOKIES_TMP.chmod(0o600)
+            _cookiefile_resolved = str(_COOKIES_TMP)
+            logger.info("yt-dlp cookies: wrote YTDLP_COOKIES to %s", _COOKIES_TMP)
+            return _cookiefile_resolved
+        except OSError as e:
+            logger.warning("yt-dlp cookies: failed to write %s: %s", _COOKIES_TMP, e)
+            _cookiefile_resolved = ""
+            return None
+
+    _cookiefile_resolved = ""
+    return None
+
 
 def _youtube_extractor_args() -> dict:
     return {"youtube": {"player_client": list(YOUTUBE_PLAYER_CLIENTS)}}
 
 
 def _base_ydl_opts(**extra) -> dict:
-    """Common yt-dlp options: public only, EJS via Deno, retries, multi-client."""
+    """Common yt-dlp options: EJS via Deno, retries, multi-client, optional cookies."""
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -356,6 +390,9 @@ def _base_ydl_opts(**extra) -> dict:
         "remote_components": {"ejs:github"},
         "extractor_args": _youtube_extractor_args(),
     }
+    cookiefile = _resolve_cookiefile()
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
     opts.update(extra)
     return opts
 
@@ -392,8 +429,8 @@ def _friendly_ytdlp_error(exc: BaseException) -> str:
     if _is_login_or_bot_block(msg):
         return (
             "YouTube is blocking this host (login, membership, or bot-check required). "
-            "Datacenter IPs are often restricted; try again later or from a different network. "
-            "Login/cookies are not supported."
+            "Datacenter IPs are often restricted; cookies or a different host may help. "
+            "Try again later if this persists."
         )
     if "copyright" in low or "blocked" in low:
         return "This content is blocked or restricted in this region."
@@ -653,9 +690,10 @@ async def health():
         "playlist_list_cap": PLAYLIST_LIST_CAP,
         "playlist_convert_cap": PLAYLIST_CONVERT_CAP,
         "playlist_concurrency": PLAYLIST_CONCURRENCY,
+        "cookies_configured": bool(_resolve_cookiefile()),
         "notice": (
             "Only download content you have rights to. YouTube ToS may restrict downloading. "
-            "Public videos/playlists only — no login or DRM bypass."
+            "Public videos/playlists preferred; optional operator cookies via env. No DRM bypass."
         ),
     }
 
@@ -963,10 +1001,13 @@ async def convert_playlist(body: PlaylistConvertRequest):
 @app.on_event("startup")
 async def startup():
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    cookies = _resolve_cookiefile()
     logger.info(
-        "YouTube Audio API ready. download_dir=%s list_cap=%s convert_cap=%s concurrency=%s",
+        "YouTube Audio API ready. download_dir=%s list_cap=%s convert_cap=%s "
+        "concurrency=%s cookies=%s",
         DOWNLOAD_DIR,
         PLAYLIST_LIST_CAP,
         PLAYLIST_CONVERT_CAP,
         PLAYLIST_CONCURRENCY,
+        cookies or "none",
     )
