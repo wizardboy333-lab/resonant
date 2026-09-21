@@ -67,15 +67,25 @@ export function absoluteDownloadUrl(path: string): string {
 }
 
 async function parseError(res: Response): Promise<string> {
+  const statusPrefix = `HTTP ${res.status}`;
   try {
     const data = await res.json();
-    if (typeof data?.detail === "string") return data.detail;
-    if (Array.isArray(data?.detail)) {
-      return data.detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join("; ");
+    if (typeof data?.detail === "string" && data.detail.trim()) {
+      return data.detail;
     }
-    return JSON.stringify(data);
+    if (Array.isArray(data?.detail)) {
+      const joined = data.detail
+        .map((d: { msg?: string }) => d.msg)
+        .filter(Boolean)
+        .join("; ");
+      if (joined) return joined;
+    }
+    if (data && typeof data === "object") {
+      return `${statusPrefix}: ${JSON.stringify(data)}`;
+    }
+    return res.statusText ? `${statusPrefix}: ${res.statusText}` : statusPrefix;
   } catch {
-    return res.statusText || `HTTP ${res.status}`;
+    return res.statusText ? `${statusPrefix}: ${res.statusText}` : statusPrefix;
   }
 }
 

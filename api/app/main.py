@@ -333,6 +333,55 @@ def quality_opts(quality: Quality) -> dict:
     }
 
 
+# Prefer clients that work better from datacenter IPs; fall back to web.
+YOUTUBE_PLAYER_CLIENTS = ["ios", "tv_embedded", "mweb", "android", "web"]
+YTDLP_RETRIES = 3
+
+
+def _youtube_extractor_args() -> dict:
+    return {"youtube": {"player_client": list(YOUTUBE_PLAYER_CLIENTS)}}
+
+
+def _base_ydl_opts(**extra) -> dict:
+    """Common yt-dlp options: public only, EJS via Deno, retries, multi-client."""
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "retries": YTDLP_RETRIES,
+        "fragment_retries": YTDLP_RETRIES,
+        "extractor_retries": YTDLP_RETRIES,
+        # Deno is installed in the Docker image; enabled by default for EJS.
+        "js_runtimes": {"deno": {}},
+        # Fallback if yt-dlp-ejs package is missing/outdated on the host.
+        "remote_components": {"ejs:github"},
+        "extractor_args": _youtube_extractor_args(),
+    }
+    opts.update(extra)
+    return opts
+
+
+def _is_login_or_bot_block(msg: str) -> bool:
+    low = msg.lower()
+    needles = (
+        "sign in",
+        "login",
+        "log in",
+        "members only",
+        "membership",
+        "confirm you're not a bot",
+        "confirm you are not a bot",
+        "not a bot",
+        "bot check",
+        "please sign in",
+        "cookies are required",
+        "use --cookies",
+        "age-restricted",
+        "age restricted",
+        "requires authentication",
+    )
+    return any(n in low for n in needles)
+
+
 def _friendly_ytdlp_error(exc: BaseException) -> str:
     msg = str(exc)
     low = msg.lower()
@@ -340,13 +389,54 @@ def _friendly_ytdlp_error(exc: BaseException) -> str:
         return "This video or playlist is private and cannot be accessed."
     if "unavailable" in low or "not available" in low:
         return "This video or playlist is unavailable."
-    if "sign in" in low or "login" in low or "members only" in low:
-        return "This content requires login or membership (not supported)."
+    if _is_login_or_bot_block(msg):
+        return (
+            "YouTube is blocking this host (login, membership, or bot-check required). "
+            "Datacenter IPs are often restricted; try again later or from a different network. "
+            "Login/cookies are not supported."
+        )
     if "copyright" in low or "blocked" in low:
         return "This content is blocked or restricted in this region."
     if "drm" in low:
         return "DRM-protected content is not supported."
     return msg
+
+
+def _http_status_for_ytdlp(exc: BaseException) -> int:
+    """Map yt-dlp failures to a clear client status (403 for host blocks)."""
+    if _is_login_or_bot_block(str(exc)):
+        return 403
+    low = str(exc).lower()
+    if "private" in low:
+        return 403
+    return 502
+
+
+def _raise_ytdlp_http(prefix: str, exc: BaseException) -> None:
+    raise HTTPException(
+        status_code=_http_status_for_ytdlp(exc),
+        detail=f"{prefix}: {_friendly_ytdlp_error(exc)}",
+    ) from exc
+
+
+def _run_with_retries(fn, *args, attempts: int = YTDLP_RETRIES):
+    """Retry transient yt-dlp failures a few times with short backoff."""
+    import time
+
+    last: BaseException | None = None
+    for i in range(max(1, attempts)):
+        try:
+            return fn(*args)
+        except Exception as e:  # noqa: BLE001 — surface via friendly mapper
+            last = e
+            if _is_login_or_bot_block(str(e)) or "private" in str(e).lower():
+                raise
+            if i + 1 >= attempts:
+                raise
+            time.sleep(0.6 * (i + 1))
+            logger.warning("yt-dlp retry %s/%s after: %s", i + 1, attempts, e)
+    assert last is not None
+    raise last
 
 
 # ---------------------------------------------------------------------------
@@ -357,46 +447,44 @@ def _friendly_ytdlp_error(exc: BaseException) -> str:
 def run_yt_dlp_info(url: str) -> dict:
     import yt_dlp
 
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        # Public URLs only — no cookies / credentials
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    if not info:
-        raise RuntimeError("No metadata returned")
-    if info.get("is_live"):
-        raise RuntimeError("Live streams are not supported")
-    return info
+    def _once() -> dict:
+        opts = _base_ydl_opts(
+            skip_download=True,
+            noplaylist=True,
+        )
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            raise RuntimeError("No metadata returned")
+        if info.get("is_live"):
+            raise RuntimeError("Live streams are not supported")
+        return info
+
+    return _run_with_retries(_once)
 
 
 def run_yt_dlp_playlist_flat(url: str, cap: int = PLAYLIST_LIST_CAP) -> dict:
     """Fast flat playlist extract (no per-video download)."""
     import yt_dlp
 
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "extract_flat": "in_playlist",
-        "playlistend": cap,
-        # Public only
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    if not info:
-        raise RuntimeError("No playlist metadata returned")
+    def _once() -> dict:
+        opts = _base_ydl_opts(
+            skip_download=True,
+            extract_flat="in_playlist",
+            playlistend=cap,
+        )
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            raise RuntimeError("No playlist metadata returned")
 
-    # Single video accidentally returned
-    if info.get("_type") not in ("playlist", "multi_video") and not info.get("entries"):
-        raise RuntimeError("URL did not resolve to a playlist")
+        # Single video accidentally returned
+        if info.get("_type") not in ("playlist", "multi_video") and not info.get("entries"):
+            raise RuntimeError("URL did not resolve to a playlist")
 
-    return info
+        return info
+
+    return _run_with_retries(_once)
 
 
 def run_yt_dlp_download(url: str, quality: Quality, outdir: Path) -> tuple[Path, dict]:
@@ -406,55 +494,55 @@ def run_yt_dlp_download(url: str, quality: Quality, outdir: Path) -> tuple[Path,
     outtmpl = str(outdir / "%(id)s.%(ext)s")
     qopts = quality_opts(quality)
 
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "outtmpl": outtmpl,
-        "format": qopts["format"],
-        "postprocessors": qopts["postprocessors"],
-        "prefer_ffmpeg": True,
-        "keepvideo": False,
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-    }
+    def _once() -> tuple[Path, dict]:
+        opts = _base_ydl_opts(
+            noplaylist=True,
+            outtmpl=outtmpl,
+            format=qopts["format"],
+            postprocessors=qopts["postprocessors"],
+            prefer_ffmpeg=True,
+            keepvideo=False,
+        )
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if not info:
-            raise RuntimeError("Download failed — no info")
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info:
+                raise RuntimeError("Download failed — no info")
 
-        requested = info.get("requested_downloads") or []
-        filepath = None
-        if requested and requested[0].get("filepath"):
-            filepath = Path(requested[0]["filepath"])
-        elif info.get("filepath"):
-            filepath = Path(info["filepath"])
-        else:
-            vid = info.get("id", "audio")
-            candidates = sorted(
-                outdir.glob(f"{vid}.*"), key=lambda p: p.stat().st_mtime, reverse=True
-            )
-            for ext in (".m4a", ".opus", ".mp3", ".webm", ".ogg", ".aac"):
-                for c in candidates:
-                    if c.suffix.lower() == ext:
-                        filepath = c
+            requested = info.get("requested_downloads") or []
+            filepath = None
+            if requested and requested[0].get("filepath"):
+                filepath = Path(requested[0]["filepath"])
+            elif info.get("filepath"):
+                filepath = Path(info["filepath"])
+            else:
+                vid = info.get("id", "audio")
+                candidates = sorted(
+                    outdir.glob(f"{vid}.*"), key=lambda p: p.stat().st_mtime, reverse=True
+                )
+                for ext in (".m4a", ".opus", ".mp3", ".webm", ".ogg", ".aac"):
+                    for c in candidates:
+                        if c.suffix.lower() == ext:
+                            filepath = c
+                            break
+                    if filepath:
                         break
-                if filepath:
-                    break
-            if not filepath and candidates:
-                filepath = candidates[0]
+                if not filepath and candidates:
+                    filepath = candidates[0]
 
-        if not filepath or not filepath.exists():
-            vid = info.get("id", "")
-            for p in outdir.iterdir():
-                if p.is_file() and vid and vid in p.name:
-                    filepath = p
-                    break
+            if not filepath or not filepath.exists():
+                vid = info.get("id", "")
+                for p in outdir.iterdir():
+                    if p.is_file() and vid and vid in p.name:
+                        filepath = p
+                        break
 
-        if not filepath or not filepath.exists():
-            raise RuntimeError("Downloaded file not found after extraction")
+            if not filepath or not filepath.exists():
+                raise RuntimeError("Downloaded file not found after extraction")
 
-        return filepath, info
+            return filepath, info
+
+    return _run_with_retries(_once)
 
 
 def meta_from_info(info: dict) -> VideoMeta:
@@ -584,9 +672,7 @@ async def get_meta(url: str = Query(..., description="YouTube URL")):
         return meta_from_info(info)
     except Exception as e:
         logger.exception("meta failed")
-        raise HTTPException(
-            status_code=502, detail=f"Could not fetch metadata: {_friendly_ytdlp_error(e)}"
-        ) from e
+        _raise_ytdlp_http("Could not fetch metadata", e)
 
 
 @app.post("/api/meta", response_model=VideoMeta)
@@ -598,9 +684,7 @@ async def post_meta(body: MetaRequest):
         return meta_from_info(info)
     except Exception as e:
         logger.exception("meta failed")
-        raise HTTPException(
-            status_code=502, detail=f"Could not fetch metadata: {_friendly_ytdlp_error(e)}"
-        ) from e
+        _raise_ytdlp_http("Could not fetch metadata", e)
 
 
 @app.post("/api/convert", response_model=ConvertResponse)
@@ -613,9 +697,7 @@ async def convert(body: ConvertRequest):
         )
     except Exception as e:
         logger.exception("convert failed")
-        raise HTTPException(
-            status_code=502, detail=f"Conversion failed: {_friendly_ytdlp_error(e)}"
-        ) from e
+        _raise_ytdlp_http("Conversion failed", e)
 
     ext = filepath.suffix.lstrip(".") or "m4a"
     safe_name = f"{info.get('id', key)}.{ext}"
@@ -695,9 +777,7 @@ async def stream_convert(
         )
     except Exception as e:
         logger.exception("stream failed")
-        raise HTTPException(
-            status_code=502, detail=f"Conversion failed: {_friendly_ytdlp_error(e)}"
-        ) from e
+        _raise_ytdlp_http("Conversion failed", e)
 
     media = {
         ".m4a": "audio/mp4",
@@ -744,10 +824,7 @@ async def get_playlist_meta(url: str = Query(..., description="YouTube playlist 
         return playlist_meta_from_info(info, PLAYLIST_LIST_CAP)
     except Exception as e:
         logger.exception("playlist meta failed")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not fetch playlist: {_friendly_ytdlp_error(e)}",
-        ) from e
+        _raise_ytdlp_http("Could not fetch playlist", e)
 
 
 @app.post("/api/playlist/meta", response_model=PlaylistMeta)
@@ -759,10 +836,7 @@ async def post_playlist_meta(body: PlaylistMetaRequest):
         return playlist_meta_from_info(info, PLAYLIST_LIST_CAP)
     except Exception as e:
         logger.exception("playlist meta failed")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not fetch playlist: {_friendly_ytdlp_error(e)}",
-        ) from e
+        _raise_ytdlp_http("Could not fetch playlist", e)
 
 
 @app.post("/api/playlist/convert")
@@ -778,10 +852,7 @@ async def convert_playlist(body: PlaylistConvertRequest):
         )
     except Exception as e:
         logger.exception("playlist convert: meta failed")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not fetch playlist: {_friendly_ytdlp_error(e)}",
-        ) from e
+        _raise_ytdlp_http("Could not fetch playlist", e)
 
     pl = playlist_meta_from_info(info, PLAYLIST_LIST_CAP)
     entry_by_id = {e.id: e for e in pl.entries}
@@ -841,7 +912,9 @@ async def convert_playlist(body: PlaylistConvertRequest):
         detail = "No tracks could be converted."
         if errors:
             detail += " " + "; ".join(errors[:5])
-        raise HTTPException(status_code=502, detail=detail)
+        # Prefer 403 when failures look like host/login blocks
+        status = 403 if any(_is_login_or_bot_block(e) for e in errors) else 502
+        raise HTTPException(status_code=status, detail=detail)
 
     # Build ZIP with safe, unique names
     used_names: set[str] = set()

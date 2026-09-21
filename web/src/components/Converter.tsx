@@ -312,7 +312,10 @@ export default function Converter({ initialUrl = "" }: { initialUrl?: string }) 
           className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
           role="alert"
         >
-          {error}
+          <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.16em] text-red-300/80">
+            Error
+          </p>
+          <p className="whitespace-pre-wrap break-words">{error}</p>
         </div>
       )}
 
