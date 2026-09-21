@@ -698,6 +698,27 @@ async def health():
     }
 
 
+@app.get("/api/status")
+async def api_status():
+    """Operator-facing status for cookie-free / tunnel hosting checks."""
+    ytdlp_ok = shutil.which("yt-dlp") is not None or True
+    ffmpeg_ok = shutil.which("ffmpeg") is not None
+    public_base = (os.environ.get("PUBLIC_BASE_URL") or "").rstrip("/")
+    return {
+        "status": "ok",
+        "yt_dlp": ytdlp_ok,
+        "ffmpeg": ffmpeg_ok,
+        "download_dir": str(DOWNLOAD_DIR),
+        "cookies_configured": bool(_resolve_cookiefile()),
+        "public_base_url": public_base or None,
+        "hosting_hint": (
+            "Cookie-free path: expose this API via Cloudflare quick tunnel and set "
+            "Render resonant-web API_INTERNAL_URL to the tunnel HTTPS URL. "
+            "See docs/RENDER.md (Cookie-free hosting)."
+        ),
+    }
+
+
 @app.get("/api/meta", response_model=VideoMeta)
 async def get_meta(url: str = Query(..., description="YouTube URL")):
     try:

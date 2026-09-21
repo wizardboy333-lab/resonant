@@ -56,6 +56,7 @@ Or: `./scripts/dev.sh` (starts API + web).
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Health + ethics notice + playlist caps |
+| GET | `/api/status` | Operator status (cookies flag, download dir, hosting hint) |
 | GET/POST | `/api/meta` | Single-video metadata preview |
 | POST | `/api/convert` | Body `{ "url", "quality": "best"\|"256"\|"128" }` |
 | GET | `/api/download/{job}/{file}` | Download extracted audio |
@@ -116,6 +117,22 @@ If the network blocks YouTube, the code path is real — verify `/health` shows 
 ## PWA
 
 `/web/public/manifest.webmanifest` + SVG icon — installable on mobile browsers.
+
+
+## Cookie-free hosting
+
+When YouTube blocks Render’s datacenter IP, run the API off-Render (e.g. this
+box) and expose it with a Cloudflare quick tunnel. Keep **resonant-web** on
+Render and set `API_INTERNAL_URL` to the tunnel HTTPS URL so `/api-proxy` works
+for visitors **without YouTube cookies**.
+
+```bash
+./scripts/keep-api-tunnel.sh
+# then set Render resonant-web API_INTERNAL_URL to the printed URL and redeploy
+```
+
+Details: [`docs/RENDER.md`](docs/RENDER.md#cookie-free-hosting-box-api--cloudflare-tunnel).
+Tunnel URLs change on restart — update the Render env each time.
 
 ## License / affiliation
 

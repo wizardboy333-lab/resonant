@@ -105,6 +105,51 @@ used. Cookies expire — re-export and update the env when converts start failin
 again. This does not guarantee every URL will work; it only improves odds on
 blocked hosts.
 
+## Cookie-free hosting (box API + Cloudflare tunnel)
+
+Prefer this path when YouTube blocks Render datacenter IPs and you do **not**
+want to store YouTube cookies on the API service.
+
+Architecture:
+
+1. Keep **resonant-web** on Render (UI + `/api-proxy`).
+2. Run the Resonant API on a non-datacenter host (this box) at
+   `http://127.0.0.1:8000` with `DOWNLOAD_DIR` set.
+3. Expose **only the API** with a Cloudflare quick tunnel:
+   `cloudflared tunnel --url http://127.0.0.1:8000`.
+4. Point Render web env `API_INTERNAL_URL` at the tunnel HTTPS URL (no trailing
+   slash). Leave `NEXT_PUBLIC_API_URL` empty so browsers stay same-origin.
+
+Helper script (starts API if needed, starts tunnel, prints URL):
+
+```bash
+./scripts/keep-api-tunnel.sh
+```
+
+Log defaults to `/workspace/cloudflared-api.log`; the active URL is also written
+to `/workspace/api-tunnel-url.txt`.
+
+### Update Render after every tunnel restart
+
+Quick tunnels (`*.trycloudflare.com`) mint a **new hostname on every restart**.
+After re-running `keep-api-tunnel.sh`:
+
+1. Open **resonant-web → Environment** in the Render Dashboard.
+2. Set `API_INTERNAL_URL` to the new `https://….trycloudflare.com` value
+   (no trailing slash).
+3. Save and **Manual Deploy** the web service (or wait for the env-change
+   restart).
+
+Verify the tunnel before switching Render:
+
+```bash
+curl -sS "$URL/health"
+curl -sS "$URL/api/meta?url=https://www.youtube.com/watch?v=jNQXAC9IVRw"
+```
+
+Do not put the tunnel URL in git or `render.yaml` — it is ephemeral. Cookies
+remain optional (see below) if you keep the API on Render itself.
+
 ## Port handling
 
 Render supplies a `PORT` environment variable. The API Dockerfile starts
