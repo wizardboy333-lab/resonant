@@ -8,15 +8,8 @@ const nextConfig = {
       { protocol: "https", hostname: "*.ggpht.com" },
     ],
   },
-  async rewrites() {
-    const api = process.env.API_INTERNAL_URL || process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
-    return [
-      {
-        source: "/api-proxy/:path*",
-        destination: `${api}/:path*`,
-      },
-    ];
-  },
+  // /api-proxy is handled at RUNTIME by app/api-proxy/[...path]/route.ts
+  // (rewrites bake destination at build time and break on Render Docker builds).
 };
 
 export default nextConfig;
