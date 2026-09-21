@@ -1,0 +1,32 @@
+services:
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    environment:
+      - DOWNLOAD_DIR=/tmp/ytaudio
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://web:3000
+    volumes:
+      - ytaudio_data:/tmp/ytaudio
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - API_INTERNAL_URL=http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  ytaudio_data:

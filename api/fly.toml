@@ -1,0 +1,24 @@
+# Fly.io app configuration for the Resonant API.
+app = "resonant-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DOWNLOAD_DIR = "/tmp/ytaudio"
+  CORS_ORIGINS = "*"
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+# Create this volume before the first deploy; files survive machine restarts.
+[[mounts]]
+  source = "ytaudio_data"
+  destination = "/tmp/ytaudio"

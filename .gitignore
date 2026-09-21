@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+downloads/*
+!downloads/.gitkeep
+node_modules/
+web/.next/
+web/out/
+web/.env.local
+*.log
+.DS_Store
+ios/DerivedData/
+*.xcuserstate

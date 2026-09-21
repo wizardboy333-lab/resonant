@@ -1,0 +1,6 @@
+# Never copy developer environment files into a production image.
+.env*
+!.env.example
+
+node_modules
+.next

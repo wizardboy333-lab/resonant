@@ -1,0 +1,18 @@
+{
+  "name": "Resonant — YouTube to Audio",
+  "short_name": "Resonant",
+  "description": "Extract audio from public YouTube URLs",
+  "start_url": "/convert",
+  "display": "standalone",
+  "background_color": "#07060a",
+  "theme_color": "#07060a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
